@@ -113,6 +113,17 @@
       border: 1px solid #ffcccc;
       display: none;
     }
+    .download-progress {
+      width: 100%;
+      background-color: #f1f1f1;
+      margin: 5px 0;
+      display: none;
+    }
+    .progress-bar {
+      height: 10px;
+      background-color: #4CAF50;
+      width: 0%;
+    }
   </style>
 </head>
 <body>
@@ -139,8 +150,8 @@
         <p>Duration: <span id="videoDuration"></span></p>
         <div>
           <h3>Quick Download:</h3>
-          <a id="bestAudioLink" class="download-btn" style="display:none;" download target="_blank">Best Audio</a>
-          <a id="bestVideoLink" class="download-btn" style="display:none;" download target="_blank">Best Video</a>
+          <a id="bestAudioLink" class="download-btn" style="display:none;" href="#" target="_blank">Best Audio</a>
+          <a id="bestVideoLink" class="download-btn" style="display:none;" href="#" target="_blank">Best Video</a>
         </div>
       </div>
     </div>
@@ -227,13 +238,14 @@
       document.getElementById('loader').style.display = 'block';
       document.getElementById('videoContainer').style.display = 'none';
       document.getElementById('searchResults').style.display = 'none';
+      document.getElementById('errorMessage').style.display = 'none';
 
       const ytRe = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
       try {
         if (ytRe.test(val)) await fetchVideoInfo(val);
         else await performSearch(val);
       } catch (err) {
-        showError(err.message);
+        showError(err.message || 'An error occurred. Please try again.');
       } finally {
         document.getElementById('loader').style.display = 'none';
       }
@@ -244,23 +256,19 @@
       const data = resp.data;
       if (data.error) throw new Error(data.error);
 
-      let vids = [];
-      if (Array.isArray(data)) vids = data;
-      else if (Array.isArray(data.videos)) vids = data.videos;
-      else if (Array.isArray(data.results)) vids = data.results;
-      else if (Array.isArray(data.items)) vids = data.items;
-
+      let vids = Array.isArray(data) ? data : data.videos || data.results || data.items || [];
+      if (data.results) vids = data.results;
+      
       const list = document.getElementById('resultsList');
       list.innerHTML = vids.length
         ? vids.map(v => {
-            const thumb = v.thumbnail || v.thumbnails?.high?.url || v.thumbnail?.default?.url || v.thumb || '';
-            const id   = v.videoId||v.id||v.id?.videoId||'';
+            const thumb = v.thumbnail || v.thumbnails?.high?.url || '';
+            const id   = v.videoId || v.id || (v.id && v.id.videoId) || ''; 
             return `<div class="result-item" onclick="selectResult('${id}')">
                       <img src="${thumb}" alt=""><p>${v.title||'Untitled'}</p>
                     </div>`;
           }).join('')
         : '<p>No results found</p>';
-
       document.getElementById('searchResults').style.display = 'block';
     }
 
@@ -270,56 +278,62 @@
     }
 
     async function fetchVideoInfo(url) {
-      const resp = await axios.get(`${API_BASE}/video`, {
-        params:{url}, timeout:30000, headers:{Accept:'application/json'}
-      });
+      const resp = await axios.get(`${API_BASE}/video`, { params:{url}, timeout:30000, headers:{Accept:'application/json'} });
       const d = resp.data;
       if (d.error) throw new Error(d.error);
 
-      document.getElementById('videoTitle').textContent    = d.title || 'Untitled';
-      document.getElementById('thumbnail').src             = d.thumbnail || '';
+      document.getElementById('videoTitle').textContent = d.title || 'Untitled';
+      document.getElementById('thumbnail').src = d.thumbnail || '';
       document.getElementById('videoDuration').textContent = formatDuration(d.duration||0);
-      document.getElementById('videoEmbed').src            = d.embed_url || `https://www.youtube.com/embed/${d.id}`;
+      document.getElementById('videoEmbed').src = d.embed_url || `https://www.youtube.com/embed/${d.id}`;
 
-      // Quick links via proxy
+      // Quick download links via direct server download (not client-side fetch)
       const aBtn = document.getElementById('bestAudioLink');
-      if (d.best_audio?.format_id) {
-        aBtn.href = `${API_BASE}/download?url=${encodeURIComponent(url)}&format=${d.best_audio.format_id}&title=${encodeURIComponent(d.title)}&ext=${d.best_audio.ext}`;
+      if (d.best_audio?.url && d.best_audio.format_id) {
+        const ext = d.best_audio.ext || 'mp3';
         aBtn.style.display = 'inline-block';
-      } else aBtn.style.display='none';
+        aBtn.href = `${API_BASE}/download?url=${encodeURIComponent(url)}&format=${d.best_audio.format_id}&title=${encodeURIComponent(d.title)}&ext=${ext}`;
+        aBtn.textContent = `Best Audio (${ext.toUpperCase()})`;
+      } else aBtn.style.display = 'none';
 
       const vBtn = document.getElementById('bestVideoLink');
-      if (d.best_video?.format_id) {
-        vBtn.href = `${API_BASE}/download?url=${encodeURIComponent(url)}&format=${d.best_video.format_id}&title=${encodeURIComponent(d.title)}&ext=${d.best_video.ext}`;
+      if (d.best_video?.url && d.best_video.format_id) {
+        const ext = d.best_video.ext || 'mp4';
         vBtn.style.display = 'inline-block';
-      } else vBtn.style.display='none';
+        vBtn.href = `${API_BASE}/download?url=${encodeURIComponent(url)}&format=${d.best_video.format_id}&title=${encodeURIComponent(d.title)}&ext=${ext}`;
+        vBtn.textContent = `Best Video (${ext.toUpperCase()})`;
+      } else vBtn.style.display = 'none';
 
-      // All formats table
       const all = Array.isArray(d.all_formats) ? d.all_formats : [];
-      populateTable('audioTableBody',      all.filter(f=>f.acodec!=='none'&&f.vcodec==='none'), url, d.title);
-      populateTable('videoTableBody',      all.filter(f=>f.vcodec!=='none'&&(!f.acodec||f.acodec==='none')), url, d.title);
-      populateTable('videoAudioTableBody', all.filter(f=>f.vcodec!=='none'&&f.acodec!=='none'), url, d.title);
+      populateTable('audioTableBody', all.filter(f=>f.acodec!=='none'&&f.vcodec==='none'&&f.format_id), d.title, url);
+      populateTable('videoTableBody', all.filter(f=>f.vcodec!=='none'&&(f.acodec==='none'||!f.acodec)&&f.format_id), d.title, url);
+      populateTable('videoAudioTableBody', all.filter(f=>f.vcodec!=='none'&&f.acodec!=='none'&&f.format_id), d.title, url);
 
       document.getElementById('videoContainer').style.display = 'block';
     }
 
-    function populateTable(bodyId, formats, videoUrl, title) {
+    function populateTable(bodyId, formats, title, originalUrl) {
       const tb = document.getElementById(bodyId);
+      const safeTitle = sanitize_filename(title || 'download');
       tb.innerHTML = formats.length
         ? formats.map(f => {
-            const downloadUrl = `${API_BASE}/download?url=${encodeURIComponent(videoUrl)}&format=${f.format_id}&title=${encodeURIComponent(title)}&ext=${f.ext}`;
+            const ext = f.ext || 'bin';
+            // Use original video URL instead of format URL for downloads
+            const downloadUrl = `${API_BASE}/download?url=${encodeURIComponent(originalUrl)}&format=${f.format_id}&title=${encodeURIComponent(title)}&ext=${ext}`;
             return `<tr>
               <td>${f.format_note||'Unknown'}</td>
-              <td>${f.ext||'N/A'}</td>
+              <td>${ext}</td>
               <td>${f.resolution||'N/A'}</td>
               <td>
-                <a href="${downloadUrl}" download class="download-btn" target="_blank">
-                  Download
-                </a>
+                <a href="${downloadUrl}" class="download-btn" target="_blank">Download</a>
               </td>
             </tr>`;
           }).join('')
         : '<tr><td colspan="4">No formats available</td></tr>';
+    }
+
+    function sanitize_filename(s) {
+      return s.replace(/[^a-zA-Z0-9 ]/g, '_').replace(/\s+/g, '_').trim();
     }
 
     function formatDuration(sec) {
@@ -329,9 +343,9 @@
       return h?`${z(h)}:${z(m)}:${z(s)}`:`${z(m)}:${z(s)}`;
     }
 
-    // Submit on Enter
-    document.getElementById('videoUrl')
-      .addEventListener('keypress', e=>{ if(e.key==='Enter') processInput(); });
+    document.getElementById('videoUrl').addEventListener('keypress', e=> {
+      if (e.key==='Enter') processInput();
+    });
   </script>
 </body>
 </html>
