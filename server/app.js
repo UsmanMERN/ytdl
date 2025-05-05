@@ -1,12 +1,14 @@
 const express = require('express');
-const youtubeDl = require('youtube-dl-exec');
-const ytDlp = youtubeDl.create('yt-dlp');
+const youtubedl = require('youtube-dl-exec');
 const yts = require("yt-search");
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Use system-installed yt-dlp binary
+const ytDlp = youtubedl.create('/usr/local/bin/yt-dlp');
 
 function sanitizeFilename(str) {
     return str.replace(/[^a-zA-Z0-9 ]/g, '_').replace(/\s+/g, '_');
@@ -37,7 +39,7 @@ app.get('/api/video', async (req, res) => {
         const videoInfo = await ytDlp(url, {
             dumpSingleJson: true,
             noWarnings: true,
-            format: 'bestvideo+bestaudio/best', // Fetch all available formats
+            format: 'bestvideo+bestaudio/best',
         });
 
         const audioFormats = videoInfo.formats.filter(format =>
@@ -62,7 +64,6 @@ app.get('/api/video', async (req, res) => {
             best_video: videoWithAudioFormats[0] || null,
             all_formats: videoInfo.formats
         };
-        console.log('data :>> ', data);
         return res.json(data);
     } catch (error) {
         console.error('Video info error:', error.message);
@@ -125,137 +126,9 @@ app.get('/api/download', async (req, res) => {
 
 app.get('/', (req, res) => {
     res.send('API is running...');
-}
-);
+});
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
-
-// index.js
-// const express = require('express');
-// const ytdl = require('ytdl-core');
-// const yts = require('yt-search');
-// const cors = require('cors');
-// const { PassThrough } = require('stream');
-
-// const app = express();
-// app.use(cors());
-// app.use(express.json());
-
-// function sanitizeFilename(str) {
-//     return str.replace(/[^a-zA-Z0-9 ]/g, '_').replace(/\s+/g, '_');
-// }
-
-// // 1) SEARCH
-// app.get('/api/search', async (req, res) => {
-//     const q = req.query.q;
-//     if (!q) return res.status(400).json({ error: 'Search query is required' });
-//     try {
-//         const result = await yts(q);
-//         res.json(result);
-//     } catch (err) {
-//         console.error('Search error:', err);
-//         res.status(500).json({ error: 'Search failed' });
-//     }
-// });
-
-// // 2) VIDEO INFO
-// app.get('/api/video', async (req, res) => {
-//     const url = req.query.url;
-//     if (!url || !ytdl.validateURL(url)) {
-//         return res.status(400).json({ error: 'Valid YouTube URL is required' });
-//     }
-
-//     try {
-//         const info = await ytdl.getInfo(url);
-
-//         // All available formats
-//         const allFormats = info.formats;
-
-//         // Audio only (hasAudio && !hasVideo)
-//         const audioFormats = allFormats
-//             .filter(f => f.hasAudio && !f.hasVideo && f.url)
-//             .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
-
-//         // Video only (hasVideo && !hasAudio)
-//         const videoFormats = allFormats
-//             .filter(f => f.hasVideo && !f.hasAudio && f.url)
-//             .sort((a, b) => (b.height || 0) - (a.height || 0));
-
-//         // Video+Audio
-//         const videoAudioFormats = allFormats
-//             .filter(f => f.hasVideo && f.hasAudio && f.url)
-//             .sort((a, b) => (b.height || 0) - (a.height || 0));
-
-//         const baseData = {
-//             id: info.videoDetails.videoId,
-//             title: info.videoDetails.title,
-//             thumbnail: info.videoDetails.thumbnails.slice(-1)[0].url,
-//             duration: parseInt(info.videoDetails.lengthSeconds, 10),
-//             embed_url: `https://www.youtube.com/embed/${info.videoDetails.videoId}`,
-//             best_audio: audioFormats[0] || null,
-//             best_video: videoAudioFormats[0] || null,  // combined is usually best
-//             all_formats: allFormats
-//         };
-
-//         res.json(baseData);
-//     } catch (err) {
-//         console.error('Video info error:', err);
-//         res.status(500).json({ error: 'Failed to retrieve video info' });
-//     }
-// });
-
-// // 3) DOWNLOAD
-// app.get('/api/download', async (req, res) => {
-//     const url = req.query.url;
-//     const format = req.query.format;  // this should be the format.itag
-//     const title = req.query.title;
-//     const ext = req.query.ext;
-
-//     if (!url || !ytdl.validateURL(url) || !format) {
-//         return res.status(400).json({ error: 'URL and format (itag) are required' });
-//     }
-
-//     // Sanitize filename
-//     const safeTitle = title
-//         ? sanitizeFilename(title)
-//         : 'video';
-//     const filename = ext
-//         ? `${safeTitle}.${ext}`
-//         : `${safeTitle}.mp4`;
-
-//     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-//     res.setHeader('Content-Type', 'application/octet-stream');
-
-//     try {
-//         // Create a passthrough so headers are set before piping
-//         const stream = new PassThrough();
-//         ytdl(url, { quality: format })
-//             .pipe(stream)
-//             .on('error', err => {
-//                 console.error('Stream error:', err);
-//                 if (!res.headersSent) {
-//                     res.status(500).end('Download error');
-//                 }
-//             });
-
-//         stream.pipe(res);
-//     } catch (err) {
-//         console.error('Download handler error:', err);
-//         if (!res.headersSent) {
-//             res.status(500).json({ error: 'Failed to download video' });
-//         }
-//     }
-// });
-
-// // Root health-check
-// app.get('/', (_, res) => {
-//     res.send('API is running...');
-// });
-
-// const PORT = process.env.PORT || 4000;
-// app.listen(PORT, () => {
-//     console.log(`Server listening on port ${PORT}`);
-// });
