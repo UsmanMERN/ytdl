@@ -540,6 +540,13 @@ def download_video():
         app.logger.error(f'Download error: {str(e)}')
         return jsonify({'error': f'Failed to download video: {str(e)}'}), 500
 
+@app.route("/", methods=["GET"])
+def redirect_to_index():
+    """
+    Redirect root URL to the index page.
+    """
+    return jsonify({"message": "Welcome to the YouTube Video Downloader API!"})
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"Starting server on port {port}...")
