@@ -232,14 +232,10 @@ import mimetypes
 import requests
 from urllib.parse import quote, urlencode
 
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 from pytubefix import Search, YouTube
-from pytubefix.helpers import reset_cache
 from io import BytesIO
-
-# Optional: clear any stale PoToken cache at startup
-# reset_cache()
 
 app = Flask(__name__)
 CORS(app)
@@ -248,7 +244,9 @@ def sanitize_filename(s: str) -> str:
     """
     Replace illegal filename characters with underscores and collapse whitespace.
     """
+    # Replace any character that is not alphanumeric or space with underscore
     sanitized = re.sub(r'[^a-zA-Z0-9 ]', '_', s)
+    # Collapse spaces to underscores
     sanitized = re.sub(r'\s+', '_', sanitized.strip())
     return sanitized
 
@@ -258,105 +256,164 @@ def index():
 
 @app.route('/api/search', methods=['GET'])
 def search_videos():
+    """
+    Search YouTube for query terms and return a list of video metadata.
+    Query param: q (string)
+    """
     query = request.args.get('q')
     if not query:
         return jsonify({'error': 'Search query is required'}), 400
 
     try:
-        search_results = Search(query).results
+        # Use pytubefix Search to find videos with use_po_token=True
+        search_results = Search(query, use_po_token=True).results
+        
         results = []
+        # Limit to first 10 results
         for video in search_results[:10]:
             try:
-                vid_id = video.video_id
+                # Get more detailed info for each video
+                video_id = video.video_id
+                
+                # Build the video URL
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                
+                # Get thumbnail URL
+                thumbnail = f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
+                
                 results.append({
-                    'id': vid_id,
+                    'id': video_id,
                     'title': video.title,
                     'description': video.description,
-                    'thumbnail': f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg",
+                    'thumbnail': thumbnail,
                     'duration': video.length,
-                    'url': f"https://www.youtube.com/watch?v={vid_id}"
+                    'url': video_url
                 })
             except Exception as e:
-                app.logger.warning(f"Error processing search result: {e}")
+                app.logger.warning(f"Error processing search result: {str(e)}")
+                continue
+        
         return jsonify({'results': results})
     except Exception as e:
-        app.logger.error(f'Search error: {e}')
-        return jsonify({'error': f'Failed to search videos: {e}'}), 500
+        app.logger.error(f'Search error: {str(e)}')
+        return jsonify({'error': f'Failed to search videos: {str(e)}'}), 500
 
 @app.route('/api/video', methods=['GET'])
 def video_info():
+    """
+    Fetch YouTube video info given a URL, including available formats with direct download URLs.
+    Query param: url (string)
+    """
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'YouTube URL is required'}), 400
 
     try:
-        # Enable PoToken to bypass bot detection
+        # Create YouTube object with use_po_token=True
         yt = YouTube(url, use_po_token=True)
-
+        
+        # Get video streams
         streams = yt.streams
+        
+        # Find best audio and video formats
         best_audio = streams.get_audio_only()
         best_video = streams.get_highest_resolution()
-
+        
+        # Prepare all formats data
         all_formats = []
+        
         for stream in streams.all():
-            info = {
+            format_info = {
                 'format_id': str(stream.itag),
                 'ext': stream.subtype,
-                'format': f"{stream.type} - {stream.subtype} ({stream.resolution or 'audio only'})",
-                'url': stream.url,
-                'acodec': 'none' if not stream.includes_audio_track else stream.audio_codec,
-                'vcodec': 'none' if not stream.includes_video_track else stream.video_codec
+                'format': f"{stream.type} - {stream.subtype} ({stream.resolution if stream.resolution else 'audio only'})",
+                'format_note': f"{stream.resolution if stream.resolution else ''} {stream.abr if stream.abr else ''}".strip(),
+                'url': stream.url
             }
+            
+            # Add codec info
+            format_info['acodec'] = 'none' if not stream.includes_audio_track else stream.audio_codec
+            format_info['vcodec'] = 'none' if not stream.includes_video_track else stream.video_codec
+            
+            # Add resolution if present
             if stream.resolution:
-                info.update({
-                    'resolution': stream.resolution,
-                    'height': int(stream.resolution.rstrip('p'))
-                })
+                # Extract height from resolution (e.g. "720p" -> 720)
+                height = int(stream.resolution.rstrip('p')) if stream.resolution and stream.resolution.rstrip('p').isdigit() else 0
+                format_info['resolution'] = stream.resolution
+                format_info['height'] = height
+            
+            # Add filesize if available
             try:
-                info['filesize'] = stream.filesize
+                format_info['filesize'] = stream.filesize
             except:
                 pass
-            all_formats.append(info)
-
-        def format_data(stream_obj, is_audio=False):
-            data = {
-                'format_id': str(stream_obj.itag),
-                'ext': stream_obj.subtype,
-                'format': f"{'Audio' if is_audio else 'Video'} - {stream_obj.subtype} ({stream_obj.abr if is_audio else stream_obj.resolution})",
-                'url': stream_obj.url
+            
+            all_formats.append(format_info)
+        
+        # Format the best_audio and best_video to include only relevant info
+        best_audio_data = None
+        if best_audio:
+            best_audio_data = {
+                'format_id': str(best_audio.itag),
+                'ext': best_audio.subtype,
+                'format': f"Audio - {best_audio.subtype} ({best_audio.abr})",
+                'acodec': best_audio.audio_codec,
+                'url': best_audio.url
             }
-            if is_audio:
-                data['acodec'] = stream_obj.audio_codec
-            else:
-                data.update({
-                    'vcodec': stream_obj.video_codec,
-                    'acodec': 'none' if not stream_obj.includes_audio_track else stream_obj.audio_codec
-                })
             try:
-                data['filesize'] = stream_obj.filesize
+                best_audio_data['filesize'] = best_audio.filesize
             except:
                 pass
-            return data
-
-        response_data = {
+        
+        best_video_data = None
+        if best_video:
+            best_video_data = {
+                'format_id': str(best_video.itag),
+                'ext': best_video.subtype,
+                'format': f"Video - {best_video.subtype} ({best_video.resolution})",
+                'vcodec': best_video.video_codec,
+                'acodec': 'none' if not best_video.includes_audio_track else best_video.audio_codec,
+                'url': best_video.url
+            }
+            if best_video.resolution:
+                best_video_data['resolution'] = best_video.resolution
+            try:
+                best_video_data['filesize'] = best_video.filesize
+            except:
+                pass
+        
+        # Get thumbnail URL
+        thumbnail = yt.thumbnail_url
+        
+        # Prepare response data
+        data = {
             'id': yt.video_id,
             'title': yt.title,
-            'thumbnail': yt.thumbnail_url,
+            'thumbnail': thumbnail,
             'duration': yt.length,
             'description': yt.description,
             'url': url,
             'embed_url': f"https://www.youtube.com/embed/{yt.video_id}",
-            'best_audio': format_data(best_audio, is_audio=True) if best_audio else None,
-            'best_video': format_data(best_video) if best_video else None,
+            'best_audio': best_audio_data,
+            'best_video': best_video_data,
             'all_formats': all_formats
         }
-        return jsonify(response_data)
+        
+        return jsonify(data)
     except Exception as e:
-        app.logger.error(f'Video info error: {e}')
-        return jsonify({'error': f'Failed to get video information: {e}'}), 500
+        app.logger.error(f'Video info error: {str(e)}')
+        return jsonify({'error': f'Failed to get video information: {str(e)}'}), 500
 
 @app.route('/api/download', methods=['GET'])
 def download_video():
+    """
+    Download a YouTube video in the specified format.
+    Query params:
+    - url: YouTube video URL
+    - format: Format/itag ID to download
+    - title: Title to use for the downloaded file
+    - ext: File extension
+    """
     url = request.args.get('url')
     format_id = request.args.get('format')
     title = request.args.get('title', 'video')
@@ -364,18 +421,28 @@ def download_video():
     
     if not url or not format_id:
         return jsonify({'error': 'URL and format are required'}), 400
-
+    
     try:
+        # Create YouTube object with use_po_token=True
         yt = YouTube(url, use_po_token=True)
+        
+        # Get the specific stream by itag
         stream = yt.streams.get_by_itag(int(format_id))
+        
         if not stream:
             return jsonify({'error': f'Format {format_id} not available'}), 404
-
+        
+        # Clean up the filename
         safe_title = sanitize_filename(title)
         filename = f"{safe_title}.{ext}"
+        
+        # Get the direct stream URL
         stream_url = stream.url
+        
+        # Set appropriate content type
         content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
-
+        
+        # Define a generator function for streaming the content
         @stream_with_context
         def generate():
             with requests.get(stream_url, stream=True) as r:
@@ -383,19 +450,23 @@ def download_video():
                 for chunk in r.iter_content(chunk_size=8192):
                     yield chunk
 
+        # Create response with proper headers for download
         response = Response(generate(), content_type=content_type)
         response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        
+        # Try to get content length for better download experience
         try:
-            head = requests.head(stream_url).headers
-            if 'content-length' in head:
-                response.headers['Content-Length'] = head['content-length']
+            headers = requests.head(stream_url).headers
+            if 'content-length' in headers:
+                response.headers['Content-Length'] = headers['content-length']
         except:
             pass
-
+            
         return response
+        
     except Exception as e:
-        app.logger.error(f'Download error: {e}')
-        return jsonify({'error': f'Failed to download: {e}'}), 500
+        app.logger.error(f'Download error: {str(e)}')
+        return jsonify({'error': f'Failed to download: {str(e)}'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
