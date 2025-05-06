@@ -224,18 +224,23 @@
 #     print(f"Starting server on port {port}...")
 #     app.run(host='0.0.0.0', port=port, debug=True)
 
-
 import os
 import re
 import json
 import mimetypes
 import requests
+import time
+import logging
 from urllib.parse import quote, urlencode
 
 from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 from pytubefix import Search, YouTube
 from io import BytesIO
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
@@ -249,6 +254,37 @@ def sanitize_filename(s: str) -> str:
     # Collapse spaces to underscores
     sanitized = re.sub(r'\s+', '_', sanitized.strip())
     return sanitized
+
+def create_youtube_object(url, max_retries=3):
+    """
+    Create a YouTube object with retries and error handling
+    """
+    for attempt in range(max_retries):
+        try:
+            # Try with use_po_token=True first
+            return YouTube(url, use_po_token=True)
+        except Exception as e:
+            logger.warning(f"Attempt {attempt+1}/{max_retries} failed: {str(e)}")
+            if attempt == 0:
+                # On first failure, try with use_oauth=True 
+                try:
+                    return YouTube(url, use_oauth=True)
+                except Exception as inner_e:
+                    logger.warning(f"OAuth attempt failed: {str(inner_e)}")
+            
+            # On subsequent failures, try with different client='WEB'
+            if "detected as a bot" in str(e) and attempt < max_retries - 1:
+                try:
+                    return YouTube(url, client='WEB', use_po_token=True)
+                except Exception as inner_e:
+                    logger.warning(f"WEB client attempt failed: {str(inner_e)}")
+            
+            # If it's the last attempt and we still have errors
+            if attempt == max_retries - 1:
+                raise
+            
+            # Wait before retrying
+            time.sleep(1)
 
 @app.route('/', methods=['GET'])
 def index():
@@ -265,8 +301,25 @@ def search_videos():
         return jsonify({'error': 'Search query is required'}), 400
 
     try:
-        # Use pytubefix Search to find videos with use_po_token=True
-        search_results = Search(query, use_po_token=True).results
+        # Try different options for search
+        search_results = None
+        error_message = None
+        
+        try:
+            # First try with use_po_token=True
+            search_results = Search(query, use_po_token=True).results
+        except Exception as e:
+            error_message = str(e)
+            logger.warning(f"Search with po_token failed: {error_message}")
+            try:
+                # Then try with different client
+                search_results = Search(query, client='WEB', use_po_token=True).results
+            except Exception as e2:
+                error_message = str(e2)
+                logger.warning(f"Search with WEB client failed: {error_message}")
+                
+        if not search_results:
+            return jsonify({'error': f'Failed to search videos: {error_message}'}), 500
         
         results = []
         # Limit to first 10 results
@@ -290,12 +343,12 @@ def search_videos():
                     'url': video_url
                 })
             except Exception as e:
-                app.logger.warning(f"Error processing search result: {str(e)}")
+                logger.warning(f"Error processing search result: {str(e)}")
                 continue
         
         return jsonify({'results': results})
     except Exception as e:
-        app.logger.error(f'Search error: {str(e)}')
+        logger.error(f'Search error: {str(e)}')
         return jsonify({'error': f'Failed to search videos: {str(e)}'}), 500
 
 @app.route('/api/video', methods=['GET'])
@@ -309,8 +362,8 @@ def video_info():
         return jsonify({'error': 'YouTube URL is required'}), 400
 
     try:
-        # Create YouTube object with use_po_token=True
-        yt = YouTube(url, use_po_token=True)
+        # Create YouTube object with our helper function
+        yt = create_youtube_object(url)
         
         # Get video streams
         streams = yt.streams
@@ -401,7 +454,7 @@ def video_info():
         
         return jsonify(data)
     except Exception as e:
-        app.logger.error(f'Video info error: {str(e)}')
+        logger.error(f'Video info error: {str(e)}')
         return jsonify({'error': f'Failed to get video information: {str(e)}'}), 500
 
 @app.route('/api/download', methods=['GET'])
@@ -423,8 +476,8 @@ def download_video():
         return jsonify({'error': 'URL and format are required'}), 400
     
     try:
-        # Create YouTube object with use_po_token=True
-        yt = YouTube(url, use_po_token=True)
+        # Create YouTube object with our helper function
+        yt = create_youtube_object(url)
         
         # Get the specific stream by itag
         stream = yt.streams.get_by_itag(int(format_id))
@@ -445,10 +498,14 @@ def download_video():
         # Define a generator function for streaming the content
         @stream_with_context
         def generate():
-            with requests.get(stream_url, stream=True) as r:
-                r.raise_for_status()
-                for chunk in r.iter_content(chunk_size=8192):
-                    yield chunk
+            try:
+                with requests.get(stream_url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    for chunk in r.iter_content(chunk_size=8192):
+                        yield chunk
+            except Exception as e:
+                logger.error(f"Streaming error: {str(e)}")
+                yield json.dumps({"error": f"Streaming failed: {str(e)}"}).encode()
 
         # Create response with proper headers for download
         response = Response(generate(), content_type=content_type)
@@ -456,7 +513,7 @@ def download_video():
         
         # Try to get content length for better download experience
         try:
-            headers = requests.head(stream_url).headers
+            headers = requests.head(stream_url, timeout=10).headers
             if 'content-length' in headers:
                 response.headers['Content-Length'] = headers['content-length']
         except:
@@ -465,7 +522,7 @@ def download_video():
         return response
         
     except Exception as e:
-        app.logger.error(f'Download error: {str(e)}')
+        logger.error(f'Download error: {str(e)}')
         return jsonify({'error': f'Failed to download: {str(e)}'}), 500
 
 if __name__ == '__main__':
